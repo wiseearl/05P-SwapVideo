@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Iterable, List, Sequence, cast
+from typing import Any, Iterable, List, Mapping, Optional, Sequence, cast
 from urllib.request import urlretrieve
 
 import cv2
@@ -25,15 +25,137 @@ MODEL_PATH = MODEL_DIR / "inswapper_128_fp16.onnx"
 ANALYSIS_MODEL_ROOT = Path(".insightface")
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Swap a face from an image into a video.")
-    parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE, help="Source face image path.")
-    parser.add_argument("--target", type=Path, default=DEFAULT_TARGET, help="Target video path.")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Output video path.")
+def _load_kv_config(config_path: Path) -> dict[str, str]:
+    if not config_path.exists():
+        return {}
+
+    config: dict[str, str] = {}
+    for raw_line in config_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(("#", ";", "//")):
+            continue
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip().lower()
+        value = value.strip().strip('"').strip("'")
+        if not key:
+            continue
+        config[key] = value
+    return config
+
+
+def _parse_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {value!r}")
+
+
+def _parse_det_size(value: str) -> tuple[int, int]:
+    normalized = value.strip().lower().replace("x", " ").replace(",", " ")
+    parts = [p for p in normalized.split() if p]
+    if len(parts) != 2:
+        raise ValueError(f"Invalid det_size value (expected 2 ints): {value!r}")
+    return int(parts[0]), int(parts[1])
+
+
+def _parse_provider_list(value: str) -> list[str]:
+    normalized = value.replace(";", ",").replace(" ", ",")
+    providers = [p.strip() for p in normalized.split(",") if p.strip()]
+    return providers
+
+
+def _resolve_path(value: str, base_dir: Path) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return (base_dir / path).resolve()
+
+
+def _first_present(config: Mapping[str, str], *keys: str) -> Optional[str]:
+    for key in keys:
+        lowered = key.lower()
+        if lowered in config:
+            return config[lowered]
+    return None
+
+
+def _apply_config_and_defaults(args: argparse.Namespace, config: Mapping[str, str], config_dir: Path) -> None:
+    source_value = _first_present(config, "reference", "ref", "source_image", "sourceimage", "face", "image")
+    target_value = _first_present(config, "source", "target", "video", "sourcevideo", "source_video", "source-video")
+    output_value = _first_present(config, "output", "out")
+    temp_output_value = _first_present(config, "temp_output", "temp-output", "tempoutput")
+    providers_value = _first_present(config, "execution_providers", "execution-provider", "execution_provider", "providers", "provider")
+    swap_all_value = _first_present(config, "swap_all_faces", "swap-all-faces", "swapallfaces")
+    max_frames_value = _first_present(config, "max_frames", "max-frames", "maxframes")
+    det_size_value = _first_present(config, "det_size", "det-size", "detsize")
+    keep_temp_value = _first_present(config, "keep_temp", "keep-temp", "keeptemp")
+
+    if getattr(args, "source", None) is None:
+        args.source = _resolve_path(source_value, config_dir) if source_value else DEFAULT_SOURCE
+    if getattr(args, "target", None) is None:
+        args.target = _resolve_path(target_value, config_dir) if target_value else DEFAULT_TARGET
+
+    if getattr(args, "output", None) is None:
+        if output_value:
+            args.output = _resolve_path(output_value, config_dir)
+        else:
+            suffix = args.target.suffix or ".mp4"
+            args.output = args.target.with_name(f"{args.target.stem}-swapped{suffix}")
+
+    if getattr(args, "temp_output", None) is None:
+        if temp_output_value:
+            args.temp_output = _resolve_path(temp_output_value, config_dir)
+        else:
+            suffix = args.target.suffix or ".mp4"
+            args.temp_output = args.target.with_name(f".tmp-{args.target.stem}-swapped{suffix}")
+    if getattr(args, "execution_providers", None) is None and providers_value:
+        args.execution_providers = _parse_provider_list(providers_value)
+    if getattr(args, "swap_all_faces", None) is None and swap_all_value is not None:
+        args.swap_all_faces = _parse_bool(swap_all_value)
+    if getattr(args, "max_frames", None) is None and max_frames_value is not None:
+        args.max_frames = int(max_frames_value)
+    if getattr(args, "det_size", None) is None and det_size_value is not None:
+        args.det_size = _parse_det_size(det_size_value)
+    if getattr(args, "keep_temp", None) is None and keep_temp_value is not None:
+        args.keep_temp = _parse_bool(keep_temp_value)
+
+    if args.max_frames is None:
+        args.max_frames = 0
+    if args.swap_all_faces is None:
+        args.swap_all_faces = False
+    if args.keep_temp is None:
+        args.keep_temp = False
+    if args.det_size is None:
+        args.det_size = (640, 640)
+
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config-swap-video.config"),
+        help="Parameter file in Key=Value format (default: config-swap-video.config).",
+    )
+    pre_args, remaining = pre_parser.parse_known_args(argv)
+    config_path = cast(Path, pre_args.config)
+    config = _load_kv_config(config_path)
+
+    parser = argparse.ArgumentParser(description="Swap a face from an image into a video.", parents=[pre_parser])
+    parser.add_argument("--source", type=Path, default=None, help="Source face image path.")
+    parser.add_argument("--target", type=Path, default=None, help="Target video path.")
+    parser.add_argument("--output", type=Path, default=None, help="Output video path.")
     parser.add_argument(
         "--temp-output",
         type=Path,
-        default=Path("videos/.tmp-01-1-70-swapped.mp4"),
+        default=None,
         help="Temporary video path before audio is muxed back.",
     )
     parser.add_argument(
@@ -46,12 +168,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--swap-all-faces",
         action="store_true",
+        default=None,
         help="Swap all detected faces in each frame instead of only the largest face.",
     )
     parser.add_argument(
         "--max-frames",
         type=int,
-        default=0,
+        default=None,
         help="Process only the first N frames for testing. 0 means full video.",
     )
     parser.add_argument(
@@ -59,15 +182,19 @@ def parse_args() -> argparse.Namespace:
         type=int,
         nargs=2,
         metavar=("WIDTH", "HEIGHT"),
-        default=(640, 640),
+        default=None,
         help="Face detector input size.",
     )
     parser.add_argument(
         "--keep-temp",
         action="store_true",
+        default=None,
         help="Keep the temporary video without remuxing cleanup.",
     )
-    return parser.parse_args()
+
+    args = parser.parse_args(remaining)
+    _apply_config_and_defaults(args, config, config_path.parent)
+    return args
 
 
 def ensure_exists(path: Path, label: str) -> None:
