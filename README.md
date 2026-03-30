@@ -26,6 +26,8 @@ C:/Users/User/AppData/Local/Programs/Python/Python39/python.exe -m pip install -
 
 `config-swap-video.config` 支援用空行（或一行 `---`）分隔多個區塊，每個區塊是一筆任務（job）。
 
+如果多筆任務共用同一張參考圖，也可以在同一個區塊內把 `Source=` 寫成首行，後續每行直接追加一個影片路徑，腳本會自動展開成多筆 job。
+
 範例：
 
 ```ini
@@ -36,6 +38,15 @@ Source=./videos/1.mp4
 
 Reference=./images/pic-race.png
 Source=./videos/2.mp4
+```
+
+或是：
+
+```ini
+Reference=./images/pic-race.png
+Source=./videos/1.mp4
+./videos/2.mp4
+./videos/3.mp4
 ```
 
 執行：

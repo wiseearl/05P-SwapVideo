@@ -33,24 +33,37 @@ def _load_kv_config_jobs(config_path: Path) -> Tuple[dict[str, str], List[dict[s
     if not config_path.exists():
         return {}, []
 
-    def parse_block(lines: List[str]) -> dict[str, str]:
+    def parse_block(lines: List[str]) -> Tuple[dict[str, str], dict[str, List[str]]]:
         config: dict[str, str] = {}
+        values_by_key: dict[str, List[str]] = {}
+        current_key: Optional[str] = None
         for raw_line in lines:
             line = raw_line.strip()
             if not line:
                 continue
             if line.startswith(("#", ";", "//")):
                 continue
+
             if "=" not in line:
+                if current_key is None:
+                    continue
+                value = line.strip().strip('"').strip("'")
+                if not value:
+                    continue
+                values_by_key.setdefault(current_key, []).append(value)
                 continue
 
             key, value = line.split("=", 1)
             key = key.strip().lower()
             value = value.strip().strip('"').strip("'")
             if not key:
+                current_key = None
                 continue
+
             config[key] = value
-        return config
+            values_by_key.setdefault(key, []).append(value)
+            current_key = key
+        return config, values_by_key
 
     raw_lines = config_path.read_text(encoding="utf-8", errors="ignore").splitlines()
     blocks: List[List[str]] = []
@@ -84,14 +97,29 @@ def _load_kv_config_jobs(config_path: Path) -> Tuple[dict[str, str], List[dict[s
         "sourcevideo",
         "source-video",
     }
+    multi_job_keys = ["source", "target", "video", "source_video", "sourcevideo", "source-video"]
 
     for block in blocks:
-        block_config = parse_block(block)
-        if not block_config:
+        block_config, values_by_key = parse_block(block)
+        if not block_config and not values_by_key:
             continue
-        is_job = any(key in block_config for key in job_marker_keys)
+        is_job = any(key in values_by_key for key in job_marker_keys)
         if is_job:
-            jobs.append(block_config)
+            expanded = False
+            for multi_job_key in multi_job_keys:
+                values = values_by_key.get(multi_job_key, [])
+                if len(values) <= 1:
+                    continue
+
+                for value in values:
+                    job_config = dict(block_config)
+                    job_config[multi_job_key] = value
+                    jobs.append(job_config)
+                expanded = True
+                break
+
+            if not expanded:
+                jobs.append(block_config)
         else:
             global_config.update(block_config)
 
