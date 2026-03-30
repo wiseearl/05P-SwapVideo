@@ -5,7 +5,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Iterable, List, Mapping, Optional, Sequence, cast
+from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple, cast
 from urllib.request import urlretrieve
 
 import cv2
@@ -26,26 +26,76 @@ ANALYSIS_MODEL_ROOT = Path(".insightface")
 
 
 def _load_kv_config(config_path: Path) -> dict[str, str]:
+    raise RuntimeError("_load_kv_config was replaced by _load_kv_config_jobs")
+
+
+def _load_kv_config_jobs(config_path: Path) -> Tuple[dict[str, str], List[dict[str, str]]]:
     if not config_path.exists():
-        return {}
+        return {}, []
 
-    config: dict[str, str] = {}
-    for raw_line in config_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith(("#", ";", "//")):
-            continue
-        if "=" not in line:
-            continue
+    def parse_block(lines: List[str]) -> dict[str, str]:
+        config: dict[str, str] = {}
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith(("#", ";", "//")):
+                continue
+            if "=" not in line:
+                continue
 
-        key, value = line.split("=", 1)
-        key = key.strip().lower()
-        value = value.strip().strip('"').strip("'")
-        if not key:
+            key, value = line.split("=", 1)
+            key = key.strip().lower()
+            value = value.strip().strip('"').strip("'")
+            if not key:
+                continue
+            config[key] = value
+        return config
+
+    raw_lines = config_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    blocks: List[List[str]] = []
+    current: List[str] = []
+    for raw_line in raw_lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            if current:
+                blocks.append(current)
+                current = []
             continue
-        config[key] = value
-    return config
+        if stripped.startswith("---"):
+            if current:
+                blocks.append(current)
+                current = []
+            continue
+        current.append(raw_line)
+    if current:
+        blocks.append(current)
+
+    global_config: dict[str, str] = {}
+    jobs: List[dict[str, str]] = []
+
+    job_marker_keys = {
+        "reference",
+        "ref",
+        "source",
+        "target",
+        "video",
+        "source_video",
+        "sourcevideo",
+        "source-video",
+    }
+
+    for block in blocks:
+        block_config = parse_block(block)
+        if not block_config:
+            continue
+        is_job = any(key in block_config for key in job_marker_keys)
+        if is_job:
+            jobs.append(block_config)
+        else:
+            global_config.update(block_config)
+
+    return global_config, jobs
 
 
 def _parse_bool(value: str) -> bool:
@@ -146,7 +196,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     pre_args, remaining = pre_parser.parse_known_args(argv)
     config_path = cast(Path, pre_args.config)
-    config = _load_kv_config(config_path)
+    global_config, job_configs = _load_kv_config_jobs(config_path)
 
     parser = argparse.ArgumentParser(description="Swap a face from an image into a video.", parents=[pre_parser])
     parser.add_argument("--source", type=Path, default=None, help="Source face image path.")
@@ -193,7 +243,22 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
 
     args = parser.parse_args(remaining)
-    _apply_config_and_defaults(args, config, config_path.parent)
+
+    args._config_dir = config_path.parent
+    args._config_global = global_config
+    args._config_jobs = job_configs
+
+    has_single_job_overrides = any(
+        getattr(args, name, None) is not None for name in ("source", "target", "output", "temp_output")
+    )
+    if has_single_job_overrides or len(job_configs) <= 1:
+        job_config = job_configs[0] if job_configs else {}
+        effective_config = dict(global_config)
+        effective_config.update(job_config)
+        _apply_config_and_defaults(args, effective_config, config_path.parent)
+        args.batch = False
+    else:
+        args.batch = True
     return args
 
 
@@ -349,14 +414,39 @@ def process_video(args: argparse.Namespace) -> Path:
 
 def main() -> int:
     args = parse_args()
-    try:
-        output_path = process_video(args)
-    except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        return 1
+    if not getattr(args, "batch", False):
+        try:
+            output_path = process_video(args)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
 
-    print(f"Output written to {output_path}")
-    return 0
+        print(f"Output written to {output_path}")
+        return 0
+
+    config_dir = cast(Path, args._config_dir)
+    global_config = cast(dict[str, str], args._config_global)
+    job_configs = cast(List[dict[str, str]], args._config_jobs)
+
+    failures = 0
+    for index, job_config in enumerate(job_configs, start=1):
+        effective_config = dict(global_config)
+        effective_config.update(job_config)
+
+        job_args = argparse.Namespace(**{k: v for k, v in vars(args).items() if not k.startswith("_")})
+        job_args.batch = False
+        _apply_config_and_defaults(job_args, effective_config, config_dir)
+
+        try:
+            output_path = process_video(job_args)
+        except Exception as exc:
+            failures += 1
+            print(f"Error (job {index}/{len(job_configs)}): {exc}", file=sys.stderr)
+            continue
+
+        print(f"Output written to {output_path}")
+
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@
 ## 安裝
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+\.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 如果你要用系統 Python，也可以改成：
@@ -17,10 +17,34 @@ C:/Users/User/AppData/Local/Programs/Python/Python39/python.exe -m pip install -
 ## 執行
 
 ```powershell
-.\.venv\Scripts\python.exe swap_video.py
+\.\.venv\Scripts\python.exe swap-video.py
 ```
 
-預設輸出：`videos/01-1-70-swapped.mp4`
+預設輸出：依 target 影片自動命名（例如 `videos/01-1-70.mp4` → `videos/01-1-70-swapped.mp4`）
+
+## Batch（config 多筆）
+
+`config-swap-video.config` 支援用空行（或一行 `---`）分隔多個區塊，每個區塊是一筆任務（job）。
+
+範例：
+
+```ini
+MaxFrames=100
+
+Reference=./images/pic-race.png
+Source=./videos/1.mp4
+
+Reference=./images/pic-race.png
+Source=./videos/2.mp4
+```
+
+執行：
+
+```powershell
+\.\.venv\Scripts\python.exe swap-video.py --config config-swap-video.config
+```
+
+若每筆 job 沒有指定 `Output`，會依該筆 `Source` 影片自動產生輸出檔名（例如 `videos/1.mp4` → `videos/1-swapped.mp4`）。
 
 ## 可用參數
 
