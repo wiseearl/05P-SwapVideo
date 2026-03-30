@@ -12,6 +12,7 @@ import cv2
 import imageio_ffmpeg
 import insightface
 import numpy as np
+import onnxruntime as ort
 from insightface.app import FaceAnalysis
 from tqdm import tqdm
 
@@ -305,6 +306,13 @@ def ensure_swapper_model(model_path: Path) -> Path:
     return model_path
 
 
+def get_default_execution_providers() -> list[str]:
+    available_providers = set(ort.get_available_providers())
+    if "CUDAExecutionProvider" in available_providers:
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    return ["CPUExecutionProvider"]
+
+
 def build_face_analyser(model_root: Path, det_size: Sequence[int], providers: Sequence[str]) -> FaceAnalysis:
     analyser = FaceAnalysis(name="buffalo_l", root=str(model_root), providers=list(providers))
     analyser.prepare(ctx_id=0, det_size=tuple(det_size))
@@ -387,7 +395,8 @@ def process_video(args: argparse.Namespace) -> Path:
     ensure_exists(args.source, "Source image")
     ensure_exists(args.target, "Target video")
 
-    providers = args.execution_providers or ["CPUExecutionProvider"]
+    providers = args.execution_providers or get_default_execution_providers()
+    print(f"Using execution providers: {', '.join(providers)}")
     ensure_swapper_model(MODEL_PATH)
     analyser = build_face_analyser(ANALYSIS_MODEL_ROOT, args.det_size, providers)
     swapper = cast(Any, insightface.model_zoo.get_model(str(MODEL_PATH), providers=providers))

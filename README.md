@@ -66,3 +66,5 @@ Source=./videos/1.mp4
 ## 備註
 
 第一次執行時，腳本會自動下載 `inswapper_128_fp16.onnx` 到 `models/`，並把 `buffalo_l` 分析模型下載到 `.insightface/`。
+
+目前 `requirements.txt` 使用 `onnxruntime-gpu`。若機器有可用的 NVIDIA CUDA 環境，腳本會自動優先使用 `CUDAExecutionProvider`，否則退回 `CPUExecutionProvider`。
